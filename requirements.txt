@@ -1,0 +1,7 @@
+streamlit
+groq
+openai 
+requests 
+streamlit 
+fpdf
+Optional
