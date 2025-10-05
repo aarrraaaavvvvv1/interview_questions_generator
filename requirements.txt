@@ -1,7 +1,4 @@
 streamlit
-groq
-openai 
-requests 
-streamlit 
+perplexity-ai
+requests
 fpdf
-Optional
