@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Business Leadership Interview Questions Generator
-FINAL OPTIMIZED VERSION: Lightweight, quota-aware, production-ready
+FINAL OPTIMIZED: Concise prompts, quota fallback, syntax fixed
 """
 
 from flask import Flask, render_template, request, jsonify, send_file, Response
@@ -29,14 +29,14 @@ app.config['SECRET_KEY'] = 'business-leadership-2025'
 update_queues = {}
 
 class BusinessInterviewGenerator:
-    """Optimized generator for business leadership questions"""
+    """Optimized generator with quota handling"""
     
     def __init__(self, gemini_key, progress_callback=None):
         self.gemini_key = gemini_key
         self.progress_callback = progress_callback
         genai.configure(api_key=gemini_key)
         
-        # Optimized model selection - prioritize fast, lightweight models
+        # Fast, lightweight models
         models_to_try = ["gemini-1.5-flash", "gemini-pro", "gemini-1.0-pro"]
         self.model = None
         
@@ -59,36 +59,28 @@ class BusinessInterviewGenerator:
         logger.info(f"📡 {message}")
     
     def generate_question(self, topic, difficulty, question_type, max_retries=2):
-        """Generate ONE business leadership question with smart error handling"""
+        """Generate ONE concise question with quota detection"""
         
-        # Optimized prompts for faster generation
+        # ULTRA-CONCISE PROMPTS (saves tokens)
         if question_type == "theory":
-            focus = f"""Generate ONE THEORETICAL question about {topic}.
-
-THEORY = Concepts, definitions, frameworks, principles, best practices.
-
-Example: "What are the key elements of transformational leadership theory?"
-
-Generate now:"""
-        else:
-            focus = f"""Generate ONE PRACTICAL scenario question about {topic}.
-
-PRACTICAL = Real business situation requiring strategic decisions.
-
-Example: "Your company's digital transformation faces resistance from senior staff. How would you proceed?"
-
-Generate now:"""
-        
-        prompt = f"""{focus}
-
+            prompt = f"""Topic: {topic}
 Difficulty: {difficulty}
-Format: Q: [question] A: [120-150 word answer]"""
+Type: Theory (concepts, principles)
+
+Generate 1 CONCISE question & answer:
+Q: [30-50 words]
+A: [100-120 words, professional, complete]"""
+        else:
+            prompt = f"""Topic: {topic}
+Difficulty: {difficulty}
+Type: Practical (business scenario)
+
+Generate 1 CONCISE scenario question & answer:
+Q: [30-50 words with context]
+A: [100-120 words, actionable, complete]"""
         
         for attempt in range(max_retries):
             try:
-                logger.debug(f"Generating {difficulty} {question_type} (attempt {attempt+1})")
-                
-                # Fast generation call
                 response = self.model.generate_content(prompt)
                 text = response.text if hasattr(response, 'text') else ""
                 
@@ -96,7 +88,7 @@ Format: Q: [question] A: [120-150 word answer]"""
                     time.sleep(1)
                     continue
                 
-                # Quick parsing
+                # Parse Q&A
                 lines = text.split('\n')
                 q_text = ""
                 a_text = ""
@@ -128,7 +120,7 @@ Format: Q: [question] A: [120-150 word answer]"""
                 if not a_text[-1] in '.!?':
                     a_text += "."
                 
-                # Quick type validation
+                # Type validation
                 if question_type == "theory":
                     if any(word in q_text.lower() for word in ["your", "you are", "how would"]):
                         time.sleep(1)
@@ -144,24 +136,22 @@ Format: Q: [question] A: [120-150 word answer]"""
             except Exception as e:
                 error_msg = str(e)
                 
-                # Smart quota error detection
+                # QUOTA DETECTION
                 if "429" in error_msg or "quota" in error_msg.lower() or "exceeded" in error_msg.lower():
-                    logger.error(f"❌ Quota exceeded for {difficulty} {question_type}")
-                    return {'error': 'quota_exceeded', 'message': 'API quota exceeded. Please use a fresh API key.'}
+                    logger.error(f"❌ QUOTA EXCEEDED")
+                    return {'error': 'quota_exceeded', 'message': 'API quota limit reached. Please use a new API key.'}
                 
-                logger.error(f"Generation error: {error_msg[:100]}")
+                logger.error(f"Error: {error_msg[:100]}")
                 time.sleep(1)
         
-        logger.error(f"❌ Failed to generate {difficulty} {question_type}")
         return None
     
     def generate_all(self, topic, total_questions, difficulty_levels, balance_ratio=0.5):
-        """Generate questions with optimized performance"""
+        """Generate questions with quota fallback"""
         start_time = time.time()
         
-        self._send_progress("🚀 Starting generation...", {'stage': 'start', 'progress': 0})
+        self._send_progress("🚀 Starting...", {'stage': 'start', 'progress': 0})
         
-        # Calculate distribution
         questions_per_level = total_questions // len(difficulty_levels)
         remainder = total_questions % len(difficulty_levels)
         
@@ -177,19 +167,19 @@ Format: Q: [question] A: [120-150 word answer]"""
             theory_count = int(level_count * balance_ratio)
             practical_count = level_count - theory_count
             
-            self._send_progress(f"📊 {difficulty} level...", 
+            self._send_progress(f"📊 {difficulty}...", 
                               {'stage': 'level_start', 'difficulty': difficulty, 
                                'progress': int((total_generated / total_questions) * 100)})
             
             questions = []
             
-            # Generate theory questions
+            # Theory
             for i in range(theory_count):
                 if quota_exceeded:
                     break
                     
                 progress = int((total_generated / total_questions) * 100)
-                self._send_progress(f"Theory question {total_generated + 1}...", 
+                self._send_progress(f"Theory Q{total_generated + 1}...", 
                                   {'stage': 'generating', 'progress': progress})
                 
                 result = self.generate_question(topic, difficulty, 'theory')
@@ -197,25 +187,25 @@ Format: Q: [question] A: [120-150 word answer]"""
                 if result and 'error' in result:
                     if result['error'] == 'quota_exceeded':
                         quota_exceeded = True
-                        self._send_progress("❌ API quota exceeded", 
-                                          {'stage': 'error', 'error': 'quota_exceeded'})
+                        self._send_progress("❌ API Quota Exceeded - Please use a new API key", 
+                                          {'stage': 'quota_error', 'error': 'quota_exceeded'})
                         break
                 elif result:
                     questions.append(result)
                     total_generated += 1
-                    self._send_progress(f"✅ Theory question complete", 
+                    self._send_progress(f"✅ Theory complete", 
                                       {'stage': 'question_complete', 'difficulty': difficulty,
                                        'question': result, 'progress': int((total_generated / total_questions) * 100)})
                 
-                time.sleep(0.2)  # Reduced delay for faster generation
+                time.sleep(0.2)
             
-            # Generate practical questions
+            # Practical
             for i in range(practical_count):
                 if quota_exceeded:
                     break
                     
                 progress = int((total_generated / total_questions) * 100)
-                self._send_progress(f"Practical question {total_generated + 1}...", 
+                self._send_progress(f"Practical Q{total_generated + 1}...", 
                                   {'stage': 'generating', 'progress': progress})
                 
                 result = self.generate_question(topic, difficulty, 'practical')
@@ -223,13 +213,13 @@ Format: Q: [question] A: [120-150 word answer]"""
                 if result and 'error' in result:
                     if result['error'] == 'quota_exceeded':
                         quota_exceeded = True
-                        self._send_progress("❌ API quota exceeded", 
-                                          {'stage': 'error', 'error': 'quota_exceeded'})
+                        self._send_progress("❌ API Quota Exceeded - Please use a new API key", 
+                                          {'stage': 'quota_error', 'error': 'quota_exceeded'})
                         break
                 elif result:
                     questions.append(result)
                     total_generated += 1
-                    self._send_progress(f"✅ Practical question complete", 
+                    self._send_progress(f"✅ Practical complete", 
                                       {'stage': 'question_complete', 'difficulty': difficulty,
                                        'question': result, 'progress': int((total_generated / total_questions) * 100)})
                 
@@ -238,14 +228,15 @@ Format: Q: [question] A: [120-150 word answer]"""
             all_q[difficulty] = questions
             
             if not quota_exceeded:
-                self._send_progress(f"✅ {difficulty} complete", {'stage': 'level_complete'})
+                self._send_progress(f"✅ {difficulty} done", {'stage': 'level_complete'})
         
         total_time = time.time() - start_time
         total = sum(len(q) for q in all_q.values())
         
         if quota_exceeded:
-            self._send_progress(f"⚠️ Stopped: {total} questions generated (quota limit reached)", 
-                              {'stage': 'quota_final', 'total': total, 'time_elapsed': round(total_time, 1), 'progress': 100})
+            self._send_progress(f"⚠️ Stopped at {total} questions - API quota limit reached. Use a new key.", 
+                              {'stage': 'quota_final', 'total': total, 'time_elapsed': round(total_time, 1), 
+                               'progress': 100, 'error': 'quota_exceeded'})
         else:
             self._send_progress(f"🎉 Complete! {total} questions in {total_time:.1f}s", 
                               {'stage': 'final', 'total': total, 'time_elapsed': round(total_time, 1), 'progress': 100})
@@ -253,7 +244,7 @@ Format: Q: [question] A: [120-150 word answer]"""
         return all_q, total_time
     
     def create_pdf(self, topic, questions, difficulty_levels):
-        """Create optimized PDF"""
+        """Create PDF"""
         filename = f"{topic.replace(' ', '_')[:50]}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
         path = os.path.join(os.getcwd(), filename)
         
@@ -298,15 +289,15 @@ def generate_stream():
         data = request.get_json()
         topic = data.get('topic', '').strip()
         gemini_key = data.get('api_key', '').strip() or os.getenv('GEMINI_API_KEY')
-        total_questions = int(data.get('total_questions', 10))  # Reduced default
+        total_questions = int(data.get('total_questions', 10))
         difficulty_levels = data.get('difficulty_levels', ['Beginner', 'Intermediate', 'Advanced'])
         balance_ratio = float(data.get('balance_ratio', 0.5))
         
         if not topic or not gemini_key:
             return jsonify({'error': 'Topic and API key required'}), 400
         
-        if total_questions > 50:  # Limit to prevent quota issues
-            return jsonify({'error': 'Maximum 50 questions allowed'}), 400
+        if total_questions > 50:
+            return jsonify({'error': 'Maximum 50 questions'}), 400
         
         import uuid
         stream_id = str(uuid.uuid4())
@@ -332,7 +323,7 @@ def generate_stream():
                 })
                 
             except Exception as e:
-                logger.error(f"Generation error: {e}")
+                logger.error(f"Error: {e}")
                 update_queues[stream_id].put({
                     'message': f'ERROR: {str(e)}',
                     'data': {'stage': 'error', 'error': str(e)}
@@ -358,7 +349,7 @@ def stream_updates(stream_id):
         
         while True:
             try:
-                update = q.get(timeout=45)  # Extended timeout
+                update = q.get(timeout=45)
                 yield f"data: {json.dumps(update)}\n\n"
                 
                 if update.get('message') in ['COMPLETE'] or update.get('message', '').startswith('ERROR'):
@@ -380,4 +371,19 @@ def download_pdf():
         api_key = data.get('api_key', '') or os.getenv('GEMINI_API_KEY')
         
         gen = BusinessInterviewGenerator(api_key)
-        filename = gen.create_pdf(topic
+        filename = gen.create_pdf(topic, questions, difficulty_levels)
+        
+        if not filename:
+            return jsonify({'error': 'PDF creation failed'}), 500
+        
+        path = os.path.join(os.getcwd(), filename)
+        return send_file(path, as_attachment=True, download_name=filename)
+    
+    except Exception as e:
+        logger.error(f"PDF error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    logger.info("🚀 Business Leadership Interview Generator (Optimized)")
+    app.run(host='0.0.0.0', port=port, debug=False)
