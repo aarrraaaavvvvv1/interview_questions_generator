@@ -84,7 +84,7 @@ Now generate:"""
         for attempt in range(max_retries):
             try:
                 logger.debug(f"Attempt {attempt+1}/{max_retries}")
-                response = self.model.generate_content(prompt, timeout=30)
+                response = self.model.generate_content(prompt)
                 text = response.text if hasattr(response, 'text') else ""
                 
                 logger.debug(f"Raw response: {text[:200]}")
