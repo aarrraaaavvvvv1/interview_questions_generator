@@ -1,235 +1,407 @@
-import streamlit as st
-from typing import List, Dict
-from dataclasses import dataclass
-import json
+#!/usr/bin/env python3
+"""
+Business Leadership Interview Questions Generator
+Production-ready Flask app with RAG, Firecrawl, real-time streaming
+"""
+
+from flask import Flask, render_template, request, jsonify, send_file, Response
+import google.generativeai as genai
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.colors import HexColor
 import os
-from fpdf import FPDF
-from perplexity import Perplexity
+import logging
+import re
 import time
+import json
+import queue
+import threading
+import requests
+from datetime import datetime
 
-# --- Data Structure ---
-@dataclass
-class Question:
-    """Holds a single interview question with its details and sources."""
-    question: str
-    answer: str
-    difficulty: str
-    sources: List[str]
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# --- Core AI Logic ---
-class InterviewGenerator:
-    """Uses Perplexity API to generate interview questions based on a curriculum."""
-    def __init__(self, api_key: str):
-        if not api_key:
-            raise ValueError("Perplexity API key is required.")
-        self.client = Perplexity(api_key=api_key)
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'business-leadership-2025'
 
-    def generate_interview_questions(self, topic: str, curriculum: str) -> List[Question]:
-        """
-        Generates a structured list of interview questions for all difficulty levels.
-        """
-        # This is the master prompt that instructs the AI. It's the "brain" of our agent.
-        prompt = f"""
-        You are an expert technical interviewer and curriculum analyst. Your task is to generate a comprehensive set of interview questions based on the provided topic and curriculum.
+FIRECRAWL_API = "https://api.firecrawl.dev/v0/scrape"
+update_queues = {}
 
-        **Topic:**
-        {topic}
-
-        **Curriculum:**
-        {curriculum}
-
-        **Your Instructions:**
-        1.  **Analyze the Curriculum:** Carefully review the curriculum to identify the most important concepts, technologies, and skills.
-        2.  **Generate Questions:** Create exactly 11 questions for EACH of the following difficulty levels: "Beginner", "Intermediate", and "Expert". This means a total of 33 questions.
-        3.  **Ensure Relevance:** Every question must be directly related to the provided curriculum.
-        4.  **Research for Currency:** For each question, perform a quick, up-to-date search to ensure the answer reflects the latest industry standards and best practices.
-        5.  **Provide Detailed Answers:** Each answer should be comprehensive, clear, and sufficient for an interviewer to validate a candidate's response.
-        6.  **Cite Your Sources:** For EACH question, you MUST provide 1 to 3 direct URL sources that you used to verify the answer's accuracy and relevance.
-        7.  **Strict JSON Output:** Your final output must be a single, valid JSON object and nothing else. Do not include any introductory text, apologies, or explanations outside of the JSON structure.
-
-        **JSON Output Format:**
-        {{
-          "questions": [
-            {{
-              "difficulty": "Beginner",
-              "question": "The first beginner-level question text...",
-              "answer": "A detailed answer for the first question.",
-              "sources": ["https://source-url-1.com", "https://source-url-2.com"]
-            }},
-            // ...10 more beginner questions...
-            {{
-              "difficulty": "Intermediate",
-              "question": "The first intermediate-level question text...",
-              "answer": "A detailed answer for the intermediate question.",
-              "sources": ["https://source-url-3.com"]
-            }}
-            // ...10 more intermediate questions...
-            {{
-              "difficulty": "Expert",
-              "question": "The first expert-level question text...",
-              "answer": "A detailed answer for the expert question.",
-              "sources": ["https://source-url-4.com", "https://source-url-5.com"]
-            }}
-            // ...10 more expert questions...
-          ]
-        }}
-        """
-
-        try:
-            st.info("Sending request to Perplexity AI... This may take a minute or two.")
-            response = self.client.chat.completions.create(
-                model="llama-3-sonar-large-32k-online", # A powerful model with web access
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.5,
-            )
-            content = response.choices[0].message.content
-            
-            # Clean and parse the JSON response
-            json_start = content.find('{')
-            json_end = content.rfind('}') + 1
-            if json_start == -1 or json_end == 0:
-                raise ValueError("No valid JSON object found in the AI's response.")
-            
-            json_str = content[json_start:json_end]
-            data = json.loads(json_str)
-            
-            # Convert JSON data to Question objects
-            questions = [
-                Question(
-                    question=q["question"],
-                    answer=q["answer"],
-                    difficulty=q["difficulty"],
-                    sources=q.get("sources", []) # Use .get for safety
-                )
-                for q in data["questions"]
-            ]
-            return questions
-
-        except Exception as e:
-            st.error(f"An error occurred while generating questions: {e}")
-            st.error(f"Raw AI Response Content:\n{content}") # Show raw content for debugging
-            return []
-
-# --- PDF Generation ---
-def generate_pdf(questions: List[Question], topic: str) -> str:
-    """Creates a professional PDF from the list of questions."""
+class BusinessInterviewGenerator:
+    """Generator for business leadership questions"""
     
-    class PDF(FPDF):
-        def __init__(self, topic_name):
-            super().__init__()
-            self.topic_name = topic_name
-            self.set_auto_page_break(auto=True, margin=15)
-
-        def header(self):
-            self.set_font('Arial', 'B', 12)
-            self.cell(0, 10, f'Interview Questions: {self.topic_name}', 0, 1, 'C')
-            self.ln(5)
-
-        def footer(self):
-            self.set_y(-15)
-            self.set_font('Arial', 'I', 8)
-            self.set_text_color(128, 128, 128)
-            self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
-
-        def chapter_title(self, title):
-            self.set_font('Arial', 'B', 16)
-            self.set_fill_color(230, 230, 230)
-            self.cell(0, 12, title, 0, 1, 'L', fill=True)
-            self.ln(8)
-
-        def question_entry(self, num, question_obj):
-            # Question
-            self.set_font('Arial', 'B', 12)
-            self.multi_cell(0, 7, f"Q{num}: {question_obj.question}")
-            self.ln(2)
-            
-            # Answer
-            self.set_font('Arial', '', 11)
-            self.multi_cell(0, 6, f"A: {question_obj.answer}")
-            self.ln(2)
-
-            # Sources
-            if question_obj.sources:
-                self.set_font('Arial', 'I', 9)
-                self.set_text_color(0, 0, 255)
-                for source in question_obj.sources:
-                    self.multi_cell(0, 5, f"Source: {source}", link=source)
-                self.set_text_color(0, 0, 0) # Reset color
-            self.ln(8)
-
-    pdf = PDF(topic)
-    pdf.add_page()
+    def __init__(self, gemini_key, firecrawl_key=None, progress_callback=None):
+        self.gemini_key = gemini_key
+        self.firecrawl_key = firecrawl_key or os.getenv('FIRECRAWL_API_KEY')
+        self.progress_callback = progress_callback
+        genai.configure(api_key=gemini_key)
+        self.model = genai.GenerativeModel("gemini-1.5-flash")
+        logger.info("✅ Generator initialized")
     
-    # Group questions by difficulty
-    questions_by_difficulty = {
-        "Beginner": [],
-        "Intermediate": [],
-        "Expert": []
-    }
-    for q in questions:
-        if q.difficulty in questions_by_difficulty:
-            questions_by_difficulty[q.difficulty].append(q)
-
-    # Add content to PDF
-    for difficulty, qs in questions_by_difficulty.items():
-        if qs:
-            pdf.chapter_title(f"{difficulty} Level Questions")
-            for i, question_obj in enumerate(qs, 1):
-                pdf.question_entry(i, question_obj)
-
-    pdf_output_path = "interview_questions.pdf"
-    pdf.output(pdf_output_path)
-    return pdf_output_path
-
-# --- Streamlit UI ---
-def main():
-    st.set_page_config(page_title="AI Interview Generator", layout="centered")
-
-    st.title("🤖 AI Interview Question Generator")
-    st.markdown("This agent uses a web-connected AI to generate relevant, up-to-date interview questions based on your specific curriculum.")
-
-    with st.sidebar:
-        st.header("⚙️ Configuration")
-        # --- IMPORTANT ---
-        # Add a placeholder for the Perplexity API key.
-        # Replace "YOUR_PPLX_API_KEY_HERE" with your actual key.
-        # You can get a key from: https://docs.perplexity.ai/
-        pplx_api_key = st.text_input("Enter your Perplexity API Key", type="password", value=os.environ.get("PPLX_API_KEY", ""))
-
-        st.info("This project is a demonstration of using a research-based AI to create high-quality, relevant interview materials.")
-
-    topic = st.text_input("**1. Enter the Interview Topic**", placeholder="e.g., Data Science, Python Backend Development")
-    curriculum = st.text_area("**2. Paste the Curriculum or Syllabus**", placeholder="Paste the detailed course outline, topics, and technologies here...", height=250)
-
-    if st.button("Generate Interview PDF", use_container_width=True):
-        if not pplx_api_key:
-            st.error("Please enter your Perplexity API Key in the sidebar to continue.")
-        elif not topic or not curriculum:
-            st.warning("Please provide both a topic and a curriculum.")
-        else:
+    def _send_progress(self, message, data=None):
+        if self.progress_callback:
+            self.progress_callback(message, data or {})
+        logger.info(f"📡 {message}")
+    
+    def search_current_content(self, topic, max_urls=2, timeout=10):
+        """RAG: Retrieve current business content"""
+        current_year = datetime.now().year
+        current_context = []
+        
+        # Business-focused sources
+        try_urls = [
+            f"https://hbr.org/search?term={topic.replace(' ', '+')}",
+            f"https://www.mckinsey.com/search?q={topic.replace(' ', '+')}",
+        ]
+        
+        for url in try_urls[:max_urls]:
             try:
-                with st.spinner("Analyzing curriculum and generating 33 interview questions... This is a complex task and may take a few minutes. Please wait."):
-                    generator = InterviewGenerator(api_key=pplx_api_key)
-                    questions = generator.generate_interview_questions(topic, curriculum)
-                
-                if questions:
-                    st.success(f"Successfully generated {len(questions)} questions!")
-                    with st.spinner("Creating your professional PDF..."):
-                        pdf_file_path = generate_pdf(questions, topic)
-
-                    with open(pdf_file_path, "rb") as pdf_file:
-                        st.download_button(
-                            label="📥 Download Interview PDF",
-                            data=pdf_file,
-                            file_name=f"{topic.replace(' ', '_')}_Interview_Questions.pdf",
-                            mime="application/pdf",
-                            use_container_width=True
-                        )
-                else:
-                    st.error("The AI failed to generate questions. Please check the logs or try a different input.")
-
+                content = self._scrape_with_firecrawl(url, timeout=timeout)
+                if content and len(content) > 500:
+                    current_context.append(content[:1500])
+                    logger.info(f"✅ Scraped: {url[:50]}...")
+                    if len(current_context) >= 1:
+                        break
             except Exception as e:
-                st.error(f"A critical error occurred: {e}")
+                logger.warning(f"⚠️ Skip {url[:40]}")
+                continue
+        
+        if current_context:
+            combined = "\n\n".join(current_context)
+            logger.info(f"✅ Web context: {len(combined)} chars")
+            return combined
+        
+        logger.warning("⚠️ No web context, using LLM knowledge")
+        return None
+    
+    def _scrape_with_firecrawl(self, url, timeout=10):
+        """Firecrawl HTTP API"""
+        if not self.firecrawl_key:
+            return None
+        
+        try:
+            response = requests.post(
+                FIRECRAWL_API,
+                headers={'Authorization': f'Bearer {self.firecrawl_key}'},
+                json={'url': url, 'formats': ['markdown'], 'onlyMainContent': True},
+                timeout=timeout
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success') and data.get('markdown'):
+                    content = data['markdown']
+                    if len(content) > 200:
+                        return content
+        except Exception as e:
+            logger.warning(f"Firecrawl error: {str(e)[:50]}")
+        
+        return None
+    
+    def generate_question(self, topic, difficulty, question_type, web_context=None, max_retries=2):
+        """Generate ONE business leadership question"""
+        current_year = datetime.now().year
+        
+        difficulty_context = {
+            "Beginner": "foundational concepts",
+            "Intermediate": "mid-level management",
+            "Advanced": "C-suite strategic thinking for 15-18+ years experience"
+        }
+        
+        context_text = ""
+        if web_context:
+            context_text = f"\n\nCurrent {current_year} business context:\n{web_context[:1000]}\n"
+        
+        if question_type == "theory":
+            focus = f"""Generate a THEORETICAL question about {topic}.
+- Focus on: Concepts, frameworks, best practices
+- For business leaders with {difficulty_context[difficulty]}
+- Business/management focused, not overly technical"""
+        else:
+            focus = f"""Generate a PRACTICAL, ANALYTICAL question about {topic}.
+- Business scenario requiring strategic thinking
+- For experienced leaders (15-18+ years)
+- Include specific business context"""
+        
+        prompt = f"""{focus}{context_text}
 
-if __name__ == "__main__":
-    main()
+**DIFFICULTY:** {difficulty}
+
+Format EXACTLY:
+Q: [40-70 words, business-appropriate question]
+
+A: [120-180 words, complete professional answer ending with punctuation]
+
+Generate now:"""
+        
+        for attempt in range(max_retries):
+            try:
+                response = self.model.generate_content(prompt)
+                text = response.text if hasattr(response, 'text') else ""
+                
+                if not text or len(text) < 100:
+                    time.sleep(1)
+                    continue
+                
+                q_match = re.search(r'Q:\s*(.+?)(?=\n\s*A:)', text, re.DOTALL | re.IGNORECASE)
+                a_match = re.search(r'A:\s*(.+?)(?=\n\n|$)', text, re.DOTALL | re.IGNORECASE)
+                
+                if q_match and a_match:
+                    question = ' '.join(re.sub(r'\*\*', '', q_match.group(1)).split())
+                    answer = ' '.join(re.sub(r'\*\*', '', a_match.group(1)).split())
+                    
+                    if len(question) < 30 or len(answer) < 80:
+                        continue
+                    
+                    if not answer.strip().endswith(('.', '!', '?')):
+                        if len(answer) > 100:
+                            answer += "."
+                        else:
+                            continue
+                    
+                    return {'question': question, 'answer': answer, 'type': question_type}
+                
+                time.sleep(1)
+            
+            except Exception as e:
+                logger.error(f"Generate error: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+        
+        return None
+    
+    def generate_all(self, topic, total_questions, difficulty_levels, balance_ratio=0.5):
+        """Generate questions with custom settings"""
+        start_time = time.time()
+        
+        self._send_progress("🚀 Starting generation...", {'stage': 'start', 'progress': 0})
+        
+        # Get web context (RAG)
+        web_context = None
+        if self.firecrawl_key:
+            self._send_progress("🔍 Fetching current content...", {'stage': 'web_search', 'progress': 0})
+            web_context = self.search_current_content(topic, max_urls=2)
+        
+        if web_context:
+            self._send_progress("✅ Using current insights", {'stage': 'web_found'})
+        else:
+            self._send_progress("Using LLM knowledge", {'stage': 'web_not_found'})
+        
+        # Calculate distribution
+        questions_per_level = total_questions // len(difficulty_levels)
+        remainder = total_questions % len(difficulty_levels)
+        
+        all_q = {}
+        total_generated = 0
+        
+        for idx, difficulty in enumerate(difficulty_levels):
+            level_count = questions_per_level + (1 if idx < remainder else 0)
+            theory_count = int(level_count * balance_ratio)
+            practical_count = level_count - theory_count
+            
+            self._send_progress(f"📊 {difficulty} level...", 
+                              {'stage': 'level_start', 'difficulty': difficulty, 
+                               'progress': int((total_generated / total_questions) * 100)})
+            
+            questions = []
+            
+            # Theory questions
+            for i in range(theory_count):
+                progress = int((total_generated / total_questions) * 100)
+                self._send_progress(f"Generating {difficulty} (Theory)...", 
+                                  {'stage': 'generating', 'progress': progress})
+                
+                q = self.generate_question(topic, difficulty, 'theory', web_context, max_retries=2)
+                
+                if q:
+                    questions.append(q)
+                    total_generated += 1
+                    self._send_progress(f"✅ {difficulty} Theory", 
+                                      {'stage': 'question_complete', 'difficulty': difficulty,
+                                       'question': q, 'progress': int((total_generated / total_questions) * 100)})
+                
+                time.sleep(0.3)
+            
+            # Practical questions
+            for i in range(practical_count):
+                progress = int((total_generated / total_questions) * 100)
+                self._send_progress(f"Generating {difficulty} (Practical)...", 
+                                  {'stage': 'generating', 'progress': progress})
+                
+                q = self.generate_question(topic, difficulty, 'practical', web_context, max_retries=2)
+                
+                if q:
+                    questions.append(q)
+                    total_generated += 1
+                    self._send_progress(f"✅ {difficulty} Practical", 
+                                      {'stage': 'question_complete', 'difficulty': difficulty,
+                                       'question': q, 'progress': int((total_generated / total_questions) * 100)})
+                
+                time.sleep(0.3)
+            
+            all_q[difficulty] = questions
+            self._send_progress(f"✅ {difficulty} complete", {'stage': 'level_complete'})
+        
+        total_time = time.time() - start_time
+        total = sum(len(q) for q in all_q.values())
+        
+        self._send_progress(f"🎉 Complete! {total} questions in {total_time:.1f}s", 
+                          {'stage': 'final', 'total': total, 'time_elapsed': round(total_time, 1), 'progress': 100})
+        
+        return all_q, total_time
+    
+    def create_pdf(self, topic, context, questions, difficulty_levels):
+        """Create professional PDF"""
+        pdf_start = time.time()
+        
+        filename = f"{topic.replace(' ', '_')[:50]}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+        path = os.path.join(os.getcwd(), filename)
+        
+        try:
+            doc = SimpleDocTemplate(path, pagesize=letter)
+            story = []
+            styles = getSampleStyleSheet()
+            
+            title_style = ParagraphStyle('Title', parent=styles['Title'], 
+                                        fontSize=24, textColor=HexColor('#2E86AB'), alignment=1)
+            story.append(Paragraph(f"Leadership Interview: {topic}", title_style))
+            story.append(Paragraph(f"Generated: {datetime.now().strftime('%B %d, %Y')}", styles['Normal']))
+            story.append(Spacer(1, 20))
+            
+            for diff in difficulty_levels:
+                if diff in questions and questions[diff]:
+                    h_style = ParagraphStyle('Header', parent=styles['Heading1'], 
+                                           fontSize=16, textColor=HexColor('#F24236'))
+                    story.append(Paragraph(f"{diff} Level", h_style))
+                    
+                    for i, q in enumerate(questions[diff], 1):
+                        q_type = q.get('type', 'general')
+                        type_label = "🎓 Theory" if q_type == 'theory' else "💼 Practical"
+                        
+                        story.append(Paragraph(f"<b>Q{i} {type_label}:</b> {q['question']}", styles['Normal']))
+                        story.append(Paragraph(f"<b>A:</b> {q['answer']}", styles['Normal']))
+                        story.append(Spacer(1, 12))
+            
+            doc.build(story)
+            
+            pdf_time = time.time() - pdf_start
+            logger.info(f"✅ PDF created in {pdf_time:.2f}s")
+            
+            return filename, pdf_time
+        except Exception as e:
+            logger.error(f"PDF error: {e}")
+            return None, 0
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/generate_stream', methods=['POST'])
+def generate_stream():
+    try:
+        data = request.get_json()
+        topic = data.get('topic', '').strip()
+        gemini_key = data.get('api_key', '').strip() or os.getenv('GEMINI_API_KEY')
+        firecrawl_key = data.get('firecrawl_key', '').strip() or os.getenv('FIRECRAWL_API_KEY')
+        total_questions = int(data.get('total_questions', 20))
+        difficulty_levels = data.get('difficulty_levels', ['Beginner', 'Intermediate', 'Advanced'])
+        balance_ratio = float(data.get('balance_ratio', 0.5))
+        
+        if not topic or not gemini_key:
+            return jsonify({'error': 'Topic and API key required'}), 400
+        
+        if total_questions < 1 or total_questions > 100:
+            return jsonify({'error': 'Questions: 1-100'}), 400
+        
+        import uuid
+        stream_id = str(uuid.uuid4())
+        update_queues[stream_id] = queue.Queue()
+        
+        def generate_in_background():
+            try:
+                def progress_callback(message, data):
+                    update_queues[stream_id].put({'message': message, 'data': data})
+                
+                gen = BusinessInterviewGenerator(gemini_key, firecrawl_key, progress_callback)
+                all_q, gen_time = gen.generate_all(topic, total_questions, difficulty_levels, balance_ratio)
+                
+                update_queues[stream_id].put({
+                    'message': 'COMPLETE',
+                    'data': {
+                        'stage': 'complete',
+                        'questions': all_q,
+                        'total': sum(len(q) for q in all_q.values()),
+                        'generation_time': gen_time,
+                        'difficulty_levels': difficulty_levels
+                    }
+                })
+                
+            except Exception as e:
+                logger.error(f"Generation error: {e}")
+                update_queues[stream_id].put({
+                    'message': f'ERROR: {str(e)}',
+                    'data': {'stage': 'error', 'error': str(e)}
+                })
+        
+        thread = threading.Thread(target=generate_in_background, daemon=True)
+        thread.start()
+        
+        return jsonify({'success': True, 'stream_id': stream_id})
+        
+    except Exception as e:
+        logger.error(f"Stream error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/stream/<stream_id>')
+def stream_updates(stream_id):
+    def generate_events():
+        if stream_id not in update_queues:
+            yield f"data: {json.dumps({'error': 'Invalid stream'})}\n\n"
+            return
+        
+        q = update_queues[stream_id]
+        
+        while True:
+            try:
+                update = q.get(timeout=30)
+                yield f"data: {json.dumps(update)}\n\n"
+                
+                if update.get('message') in ['COMPLETE'] or update.get('message', '').startswith('ERROR'):
+                    if stream_id in update_queues:
+                        del update_queues[stream_id]
+                    break
+            except queue.Empty:
+                yield f"data: {json.dumps({'message': 'ping'})}\n\n"
+    
+    return Response(generate_events(), mimetype='text/event-stream')
+
+@app.route('/download_pdf', methods=['POST'])
+def download_pdf():
+    try:
+        data = request.get_json()
+        topic = data.get('topic', '')
+        context = data.get('context', '')
+        questions = data.get('questions', {})
+        difficulty_levels = data.get('difficulty_levels', ['Beginner', 'Intermediate', 'Advanced'])
+        api_key = data.get('api_key', '') or os.getenv('GEMINI_API_KEY')
+        
+        gen = BusinessInterviewGenerator(api_key)
+        filename, pdf_time = gen.create_pdf(topic, context, questions, difficulty_levels)
+        
+        if not filename:
+            return jsonify({'error': 'PDF failed'}), 500
+        
+        path = os.path.join(os.getcwd(), filename)
+        return send_file(path, as_attachment=True, download_name=filename)
+    
+    except Exception as e:
+        logger.error(f"PDF error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    logger.info("🔥 Business Leadership Interview Generator")
+    logger.info(f"   Port: {port}")
+    app.run(host='0.0.0.0', port=port, debug=False)
