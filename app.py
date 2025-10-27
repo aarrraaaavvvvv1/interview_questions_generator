@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-Business Leadership Interview Questions Generator - FIXED & WORKING
+Business Leadership Interview Questions Generator
+Production-ready Flask app with RAG, Firecrawl, real-time streaming
+FIXED: Proper theory vs practical distinction with validation
 """
 
 from flask import Flask, render_template, request, jsonify, send_file, Response
@@ -19,7 +21,7 @@ import threading
 import requests
 from datetime import datetime
 
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -37,7 +39,7 @@ class BusinessInterviewGenerator:
         self.progress_callback = progress_callback
         genai.configure(api_key=gemini_key)
         
-        # Try models in order - use the one that works
+        # Try models in order
         models_to_try = ["gemini-2.5-pro", "gemini-1.5-pro", "gemini-1.0-pro", "gemini-pro"]
         self.model = None
         
@@ -48,11 +50,10 @@ class BusinessInterviewGenerator:
                 self.model = test_model
                 break
             except Exception as e:
-                logger.warning(f"⚠️ {model_name} failed: {str(e)[:50]}")
+                logger.warning(f"⚠️ {model_name} failed")
                 continue
         
         if not self.model:
-            logger.error("❌ No available models!")
             raise Exception("No Gemini models available")
     
     def _send_progress(self, message, data=None):
@@ -61,40 +62,63 @@ class BusinessInterviewGenerator:
         logger.info(f"📡 {message}")
     
     def generate_question(self, topic, difficulty, question_type, web_context=None, max_retries=2):
-        """Generate ONE business leadership question"""
+        """Generate ONE business leadership question with Answer with proper type validation"""
         current_year = datetime.now().year
         
+        # CLEAR DISTINCTION between theory and practical
         if question_type == "theory":
-            focus = f"""Generate ONE business theory question about {topic}."""
-        else:
-            focus = f"""Generate ONE practical business scenario about {topic}."""
+            focus = f"""Generate ONE THEORETICAL question about {topic}.
+
+THEORY means:
+- Generic questions
+- Asking about concepts, definitions, frameworks, models
+- Testing knowledge of principles and best practices
+- Explanation of theories and methodologies
+- NO specific scenarios or case studies
+- Focus on "What is...", "Define...", "Explain the concept..."
+
+Example theory question:
+Q: What is the difference between Supervised and Unsupervised Learning?
+
+Your turn - generate a THEORETICAL question about {topic} now:"""
+        else:  # practical
+            focus = f"""Generate ONE PRACTICAL, SCENARIO-BASED question about {topic}.
+
+PRACTICAL means:
+- Presenting a real-world business scenario/situation
+- Asking how to handle a specific case
+- Requiring strategic decision-making
+- Include context: company size, industry, specific challenge
+- Focus on "How would you...", "What would you do if...", "A company faces..."
+
+Example practical question:
+Q: Your Fortune 500 financial services company is facing resistance to digital transformation from senior leaders who are comfortable with legacy systems. As Chief Transformation Officer, how would you address this resistance while maintaining business continuity?
+A: I would implement a three-phase approach: First, conduct stakeholder mapping to understand specific concerns and identify champions. Second, create a pilot program demonstrating quick wins with minimal disruption. Third, establish a change coalition including resistant leaders, giving them ownership of specific transformation initiatives to build buy-in through involvement.
+
+Your turn - generate a PRACTICAL SCENARIO question about {topic} now:"""
         
         prompt = f"""{focus}
 
-Difficulty: {difficulty}
+Difficulty: {difficulty} level (for business leaders)
 
-IMPORTANT: Your response MUST follow this exact format:
+STRICT FORMAT:
+Q: [40-70 word question]
 
-Q: [40-70 word question here]
+A: [120-180 word complete answer ending with punctuation]
 
-A: [120-180 word answer here]
-
-Now generate:"""
+Generate now:"""
         
         for attempt in range(max_retries):
             try:
-                logger.debug(f"Attempt {attempt+1}/{max_retries}")
+                logger.debug(f"Generating {difficulty} {question_type} (attempt {attempt+1})")
                 response = self.model.generate_content(prompt)
                 text = response.text if hasattr(response, 'text') else ""
                 
-                logger.debug(f"Raw response: {text[:200]}")
-                
                 if not text or len(text) < 50:
-                    logger.warning(f"Response too short")
                     time.sleep(1)
                     continue
                 
-                # FLEXIBLE PARSING - handle any format
+                # Parse Q&A
                 lines = text.split('\n')
                 q_text = ""
                 a_text = ""
@@ -120,17 +144,8 @@ Now generate:"""
                 q_text = ' '.join(q_text.split())
                 a_text = ' '.join(a_text.split())
                 
-                logger.debug(f"Parsed Q: {q_text[:100]}")
-                logger.debug(f"Parsed A: {a_text[:100]}")
-                
-                # Validate
-                if len(q_text) < 20:
-                    logger.warning("Question too short")
-                    time.sleep(1)
-                    continue
-                
-                if len(a_text) < 50:
-                    logger.warning("Answer too short")
+                # Validate length
+                if len(q_text) < 20 or len(a_text) < 50:
                     time.sleep(1)
                     continue
                 
@@ -138,18 +153,34 @@ Now generate:"""
                 if not a_text[-1] in '.!?':
                     a_text += "."
                 
-                logger.info(f"✅ Generated {difficulty} {question_type}")
+                # VALIDATION: Check if type matches content
+                if question_type == "theory":
+                    # Theory questions should NOT have scenario keywords
+                    scenario_keywords = ["your company", "you are", "how would you", "what would you do", "as a", "as the"]
+                    if any(keyword in q_text.lower() for keyword in scenario_keywords):
+                        logger.warning(f"Theory question has scenario words - retrying")
+                        time.sleep(1)
+                        continue
+                else:  # practical
+                    # Practical questions SHOULD have scenario/action keywords
+                    scenario_keywords = ["your", "you", "how would", "what would", "as", "company", "organization", "scenario"]
+                    if not any(keyword in q_text.lower() for keyword in scenario_keywords):
+                        logger.warning(f"Practical question lacks scenario - retrying")
+                        time.sleep(1)
+                        continue
+                
+                logger.info(f"✅ Generated valid {difficulty} {question_type}")
                 return {'question': q_text, 'answer': a_text, 'type': question_type}
                 
             except Exception as e:
-                logger.error(f"Error attempt {attempt+1}: {str(e)[:100]}")
+                logger.error(f"Error: {str(e)[:100]}")
                 time.sleep(1)
         
         logger.error(f"❌ Failed to generate {difficulty} {question_type}")
         return None
     
     def generate_all(self, topic, total_questions, difficulty_levels, balance_ratio=0.5):
-        """Generate questions"""
+        """Generate questions with custom settings"""
         start_time = time.time()
         
         self._send_progress("🚀 Starting...", {'stage': 'start', 'progress': 0})
@@ -172,7 +203,7 @@ Now generate:"""
             
             questions = []
             
-            # Generate theory
+            # Generate theory questions
             for i in range(theory_count):
                 progress = int((total_generated / total_questions) * 100)
                 self._send_progress(f"Generating {difficulty} (Theory)...", 
@@ -189,7 +220,7 @@ Now generate:"""
                 
                 time.sleep(0.5)
             
-            # Generate practical
+            # Generate practical questions
             for i in range(practical_count):
                 progress = int((total_generated / total_questions) * 100)
                 self._send_progress(f"Generating {difficulty} (Practical)...", 
@@ -218,7 +249,7 @@ Now generate:"""
         return all_q, total_time
     
     def create_pdf(self, topic, context, questions, difficulty_levels):
-        """Create PDF"""
+        """Create professional PDF"""
         pdf_start = time.time()
         
         filename = f"{topic.replace(' ', '_')[:50]}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
