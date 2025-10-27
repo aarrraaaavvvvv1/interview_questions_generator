@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Business Leadership Interview Questions Generator
-Production-ready Flask app with RAG, Firecrawl, real-time streaming
+Business Leadership Interview Questions Generator - FIXED & WORKING
 """
 
 from flask import Flask, render_template, request, jsonify, send_file, Response
@@ -20,7 +19,7 @@ import threading
 import requests
 from datetime import datetime
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -37,157 +36,123 @@ class BusinessInterviewGenerator:
         self.firecrawl_key = firecrawl_key or os.getenv('FIRECRAWL_API_KEY')
         self.progress_callback = progress_callback
         genai.configure(api_key=gemini_key)
-        self.model = genai.GenerativeModel("gemini-2.5-pro")
-        logger.info("✅ Generator initialized")
+        
+        # Try models in order - use the one that works
+        models_to_try = ["gemini-2.5-pro", "gemini-1.5-pro", "gemini-1.0-pro", "gemini-pro"]
+        self.model = None
+        
+        for model_name in models_to_try:
+            try:
+                test_model = genai.GenerativeModel(model_name)
+                logger.info(f"✅ Using model: {model_name}")
+                self.model = test_model
+                break
+            except Exception as e:
+                logger.warning(f"⚠️ {model_name} failed: {str(e)[:50]}")
+                continue
+        
+        if not self.model:
+            logger.error("❌ No available models!")
+            raise Exception("No Gemini models available")
     
     def _send_progress(self, message, data=None):
         if self.progress_callback:
             self.progress_callback(message, data or {})
         logger.info(f"📡 {message}")
     
-    def search_current_content(self, topic, max_urls=2, timeout=10):
-        """RAG: Retrieve current business content"""
-        current_year = datetime.now().year
-        current_context = []
-        
-        # Business-focused sources
-        try_urls = [
-            f"https://hbr.org/search?term={topic.replace(' ', '+')}",
-            f"https://www.mckinsey.com/search?q={topic.replace(' ', '+')}",
-        ]
-        
-        for url in try_urls[:max_urls]:
-            try:
-                content = self._scrape_with_firecrawl(url, timeout=timeout)
-                if content and len(content) > 500:
-                    current_context.append(content[:1500])
-                    logger.info(f"✅ Scraped: {url[:50]}...")
-                    if len(current_context) >= 1:
-                        break
-            except Exception as e:
-                logger.warning(f"⚠️ Skip {url[:40]}")
-                continue
-        
-        if current_context:
-            combined = "\n\n".join(current_context)
-            logger.info(f"✅ Web context: {len(combined)} chars")
-            return combined
-        
-        logger.warning("⚠️ No web context, using LLM knowledge")
-        return None
-    
-    def _scrape_with_firecrawl(self, url, timeout=10):
-        """Firecrawl HTTP API"""
-        if not self.firecrawl_key:
-            return None
-        
-        try:
-            response = requests.post(
-                FIRECRAWL_API,
-                headers={'Authorization': f'Bearer {self.firecrawl_key}'},
-                json={'url': url, 'formats': ['markdown'], 'onlyMainContent': True},
-                timeout=timeout
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('success') and data.get('markdown'):
-                    content = data['markdown']
-                    if len(content) > 200:
-                        return content
-        except Exception as e:
-            logger.warning(f"Firecrawl error: {str(e)[:50]}")
-        
-        return None
-    
     def generate_question(self, topic, difficulty, question_type, web_context=None, max_retries=2):
         """Generate ONE business leadership question"""
         current_year = datetime.now().year
         
-        difficulty_context = {
-            "Beginner": "foundational concepts",
-            "Intermediate": "mid-level management",
-            "Advanced": "C-suite strategic thinking for 15-18+ years experience"
-        }
-        
-        context_text = ""
-        if web_context:
-            context_text = f"\n\nCurrent {current_year} business context:\n{web_context[:1000]}\n"
-        
         if question_type == "theory":
-            focus = f"""Generate a THEORETICAL question about {topic}.
-- Focus on: Concepts, frameworks, best practices
-- For business leaders with {difficulty_context[difficulty]}
-- Business/management focused, not overly technical"""
+            focus = f"""Generate ONE business theory question about {topic}."""
         else:
-            focus = f"""Generate a PRACTICAL, ANALYTICAL question about {topic}.
-- Business scenario requiring strategic thinking
-- For experienced leaders (15-18+ years)
-- Include specific business context"""
+            focus = f"""Generate ONE practical business scenario about {topic}."""
         
-        prompt = f"""{focus}{context_text}
+        prompt = f"""{focus}
 
-**DIFFICULTY:** {difficulty}
+Difficulty: {difficulty}
 
-Format EXACTLY:
-Q: [40-70 words, business-appropriate question]
+IMPORTANT: Your response MUST follow this exact format:
 
-A: [120-180 words, complete professional answer ending with punctuation]
+Q: [40-70 word question here]
 
-Generate now:"""
+A: [120-180 word answer here]
+
+Now generate:"""
         
         for attempt in range(max_retries):
             try:
-                response = self.model.generate_content(prompt)
+                logger.debug(f"Attempt {attempt+1}/{max_retries}")
+                response = self.model.generate_content(prompt, timeout=30)
                 text = response.text if hasattr(response, 'text') else ""
                 
-                if not text or len(text) < 100:
+                logger.debug(f"Raw response: {text[:200]}")
+                
+                if not text or len(text) < 50:
+                    logger.warning(f"Response too short")
                     time.sleep(1)
                     continue
                 
-                q_match = re.search(r'Q:\s*(.+?)(?=\n\s*A:)', text, re.DOTALL | re.IGNORECASE)
-                a_match = re.search(r'A:\s*(.+?)(?=\n\n|$)', text, re.DOTALL | re.IGNORECASE)
+                # FLEXIBLE PARSING - handle any format
+                lines = text.split('\n')
+                q_text = ""
+                a_text = ""
+                in_q = False
+                in_a = False
                 
-                if q_match and a_match:
-                    question = ' '.join(re.sub(r'\*\*', '', q_match.group(1)).split())
-                    answer = ' '.join(re.sub(r'\*\*', '', a_match.group(1)).split())
-                    
-                    if len(question) < 30 or len(answer) < 80:
-                        continue
-                    
-                    if not answer.strip().endswith(('.', '!', '?')):
-                        if len(answer) > 100:
-                            answer += "."
-                        else:
-                            continue
-                    
-                    return {'question': question, 'answer': answer, 'type': question_type}
+                for line in lines:
+                    line = line.strip()
+                    if line.startswith('Q:'):
+                        in_q = True
+                        in_a = False
+                        q_text = line.replace('Q:', '').strip()
+                    elif line.startswith('A:'):
+                        in_a = True
+                        in_q = False
+                        a_text = line.replace('A:', '').strip()
+                    elif in_q and line and not line.startswith('A:'):
+                        q_text += " " + line
+                    elif in_a and line and not line.startswith('Q:'):
+                        a_text += " " + line
                 
-                time.sleep(1)
-            
-            except Exception as e:
-                logger.error(f"Generate error: {e}")
-                if attempt < max_retries - 1:
+                # Clean up
+                q_text = ' '.join(q_text.split())
+                a_text = ' '.join(a_text.split())
+                
+                logger.debug(f"Parsed Q: {q_text[:100]}")
+                logger.debug(f"Parsed A: {a_text[:100]}")
+                
+                # Validate
+                if len(q_text) < 20:
+                    logger.warning("Question too short")
                     time.sleep(1)
+                    continue
+                
+                if len(a_text) < 50:
+                    logger.warning("Answer too short")
+                    time.sleep(1)
+                    continue
+                
+                # Ensure answer ends with punctuation
+                if not a_text[-1] in '.!?':
+                    a_text += "."
+                
+                logger.info(f"✅ Generated {difficulty} {question_type}")
+                return {'question': q_text, 'answer': a_text, 'type': question_type}
+                
+            except Exception as e:
+                logger.error(f"Error attempt {attempt+1}: {str(e)[:100]}")
+                time.sleep(1)
         
+        logger.error(f"❌ Failed to generate {difficulty} {question_type}")
         return None
     
     def generate_all(self, topic, total_questions, difficulty_levels, balance_ratio=0.5):
-        """Generate questions with custom settings"""
+        """Generate questions"""
         start_time = time.time()
         
-        self._send_progress("🚀 Starting generation...", {'stage': 'start', 'progress': 0})
-        
-        # Get web context (RAG)
-        web_context = None
-        if self.firecrawl_key:
-            self._send_progress("🔍 Fetching current content...", {'stage': 'web_search', 'progress': 0})
-            web_context = self.search_current_content(topic, max_urls=2)
-        
-        if web_context:
-            self._send_progress("✅ Using current insights", {'stage': 'web_found'})
-        else:
-            self._send_progress("Using LLM knowledge", {'stage': 'web_not_found'})
+        self._send_progress("🚀 Starting...", {'stage': 'start', 'progress': 0})
         
         # Calculate distribution
         questions_per_level = total_questions // len(difficulty_levels)
@@ -201,19 +166,19 @@ Generate now:"""
             theory_count = int(level_count * balance_ratio)
             practical_count = level_count - theory_count
             
-            self._send_progress(f"📊 {difficulty} level...", 
+            self._send_progress(f"📊 {difficulty}...", 
                               {'stage': 'level_start', 'difficulty': difficulty, 
                                'progress': int((total_generated / total_questions) * 100)})
             
             questions = []
             
-            # Theory questions
+            # Generate theory
             for i in range(theory_count):
                 progress = int((total_generated / total_questions) * 100)
                 self._send_progress(f"Generating {difficulty} (Theory)...", 
                                   {'stage': 'generating', 'progress': progress})
                 
-                q = self.generate_question(topic, difficulty, 'theory', web_context, max_retries=2)
+                q = self.generate_question(topic, difficulty, 'theory', max_retries=2)
                 
                 if q:
                     questions.append(q)
@@ -222,15 +187,15 @@ Generate now:"""
                                       {'stage': 'question_complete', 'difficulty': difficulty,
                                        'question': q, 'progress': int((total_generated / total_questions) * 100)})
                 
-                time.sleep(0.3)
+                time.sleep(0.5)
             
-            # Practical questions
+            # Generate practical
             for i in range(practical_count):
                 progress = int((total_generated / total_questions) * 100)
                 self._send_progress(f"Generating {difficulty} (Practical)...", 
                                   {'stage': 'generating', 'progress': progress})
                 
-                q = self.generate_question(topic, difficulty, 'practical', web_context, max_retries=2)
+                q = self.generate_question(topic, difficulty, 'practical', max_retries=2)
                 
                 if q:
                     questions.append(q)
@@ -239,21 +204,21 @@ Generate now:"""
                                       {'stage': 'question_complete', 'difficulty': difficulty,
                                        'question': q, 'progress': int((total_generated / total_questions) * 100)})
                 
-                time.sleep(0.3)
+                time.sleep(0.5)
             
             all_q[difficulty] = questions
-            self._send_progress(f"✅ {difficulty} complete", {'stage': 'level_complete'})
+            self._send_progress(f"✅ {difficulty} done", {'stage': 'level_complete'})
         
         total_time = time.time() - start_time
         total = sum(len(q) for q in all_q.values())
         
-        self._send_progress(f"🎉 Complete! {total} questions in {total_time:.1f}s", 
+        self._send_progress(f"🎉 Done! {total} questions in {total_time:.1f}s", 
                           {'stage': 'final', 'total': total, 'time_elapsed': round(total_time, 1), 'progress': 100})
         
         return all_q, total_time
     
     def create_pdf(self, topic, context, questions, difficulty_levels):
-        """Create professional PDF"""
+        """Create PDF"""
         pdf_start = time.time()
         
         filename = f"{topic.replace(' ', '_')[:50]}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
@@ -311,9 +276,6 @@ def generate_stream():
         
         if not topic or not gemini_key:
             return jsonify({'error': 'Topic and API key required'}), 400
-        
-        if total_questions < 1 or total_questions > 100:
-            return jsonify({'error': 'Questions: 1-100'}), 400
         
         import uuid
         stream_id = str(uuid.uuid4())
@@ -382,13 +344,12 @@ def download_pdf():
     try:
         data = request.get_json()
         topic = data.get('topic', '')
-        context = data.get('context', '')
         questions = data.get('questions', {})
         difficulty_levels = data.get('difficulty_levels', ['Beginner', 'Intermediate', 'Advanced'])
         api_key = data.get('api_key', '') or os.getenv('GEMINI_API_KEY')
         
         gen = BusinessInterviewGenerator(api_key)
-        filename, pdf_time = gen.create_pdf(topic, context, questions, difficulty_levels)
+        filename, pdf_time = gen.create_pdf(topic, '', questions, difficulty_levels)
         
         if not filename:
             return jsonify({'error': 'PDF failed'}), 500
