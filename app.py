@@ -37,7 +37,7 @@ class BusinessInterviewGenerator:
         self.firecrawl_key = firecrawl_key or os.getenv('FIRECRAWL_API_KEY')
         self.progress_callback = progress_callback
         genai.configure(api_key=gemini_key)
-        self.model = genai.GenerativeModel("gemini-1.5-flash")
+        self.model = genai.GenerativeModel("gemini-2.5-pro")
         logger.info("✅ Generator initialized")
     
     def _send_progress(self, message, data=None):
