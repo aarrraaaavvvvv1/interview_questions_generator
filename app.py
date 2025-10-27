@@ -40,7 +40,7 @@ class BusinessInterviewGenerator:
         genai.configure(api_key=gemini_key)
         
         # Try models in order
-        models_to_try = ["gemini-2.5-pro", "gemini-1.5-pro", "gemini-1.0-pro", "gemini-pro"]
+        models_to_try = ["gemini-2.5-pro", "gemini-1.5-flash", "gemini-pro"]
         self.model = None
         
         for model_name in models_to_try:
