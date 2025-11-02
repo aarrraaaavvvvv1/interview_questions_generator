@@ -1,389 +1,338 @@
-#!/usr/bin/env python3
-"""
-Business Leadership Interview Questions Generator
-FINAL OPTIMIZED: Concise prompts, quota fallback, syntax fixed
-"""
-
-from flask import Flask, render_template, request, jsonify, send_file, Response
-import google.generativeai as genai
-from reportlab.lib.pagesizes import letter
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-from reportlab.lib.colors import HexColor
+import streamlit as st
 import os
-import logging
-import re
-import time
-import json
-import queue
-import threading
-import requests
-from datetime import datetime
+from dotenv import load_dotenv
+from modules.gemini_handler import GeminiHandler
+from modules.question_generator import QuestionGenerator
+from modules.pdf_generator import PDFGenerator
+from modules.web_scraper import WebScraper
+from modules.rag_handler import RAGHandler
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+load_dotenv()
 
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'business-leadership-2025'
+st.set_page_config(
+    page_title="Interview Questions Generator",
+    page_icon="🎯",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-update_queues = {}
+st.markdown("""
+    <style>
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: bold;
+        color: #1f77b4;
+        margin-bottom: 1rem;
+    }
+    .info-box {
+        background-color: #e8f4f8;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+        border-left: 4px solid #1f77b4;
+        color: #0d3b66;
+    }
+    .tips-box {
+        background-color: #fff3cd;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+        border-left: 4px solid #ff9800;
+        color: #333333;
+    }
+    .error-box {
+        background-color: #f8d7da;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        color: #721c24;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
-class BusinessInterviewGenerator:
-    """Optimized generator with quota handling"""
+if "questions_generated" not in st.session_state:
+    st.session_state.questions_generated = False
+    st.session_state.questions_data = None
+
+def main():
+    st.markdown('<div class="main-header">🎯 Interview Questions Generator</div>', unsafe_allow_html=True)
     
-    def __init__(self, gemini_key, progress_callback=None):
-        self.gemini_key = gemini_key
-        self.progress_callback = progress_callback
-        genai.configure(api_key=gemini_key)
+    with st.sidebar:
+        st.header("⚙️ Configuration")
         
-        # Fast, lightweight models
-        models_to_try = ["gemini-1.5-flash", "gemini-pro", "gemini-1.0-pro"]
-        self.model = None
+        data_source = st.radio(
+            "Select Data Source",
+            options=["Gemini Only", "Web Scraping + Gemini", "RAG + Gemini"],
+            help="Choose how to enhance question generation with external data"
+        )
         
-        for model_name in models_to_try:
-            try:
-                test_model = genai.GenerativeModel(model_name)
-                logger.info(f"✅ Using model: {model_name}")
-                self.model = test_model
-                break
-            except Exception as e:
-                logger.warning(f"⚠️ {model_name} failed")
-                continue
+        web_scraper_enabled = data_source == "Web Scraping + Gemini"
+        rag_enabled = data_source == "RAG + Gemini"
         
-        if not self.model:
-            raise Exception("No Gemini models available")
+        st.divider()
+        st.subheader("API Configuration")
+        
+        api_key = st.text_input(
+            "Gemini API Key",
+            value=os.getenv("GEMINI_API_KEY", ""),
+            type="password",
+            help="Get your API key from https://aistudio.google.com/app/apikey"
+        )
+        
+        st.markdown("[Get your Gemini API Key here](https://aistudio.google.com/app/apikey) 🔑")
+        
+        if not api_key and not os.getenv("GEMINI_API_KEY"):
+            st.warning("⚠️ Please provide a Gemini API Key")
+        
+        model_name = st.selectbox(
+            "Select Gemini Model",
+            options=[
+                "models/gemini-2.5-flash",
+                "models/gemini-2.5-pro",
+                "models/gemini-2.5-flash-lite"
+            ],
+            help="Choose the Gemini model version (Flash is fastest & cheapest)"
+        )
     
-    def _send_progress(self, message, data=None):
-        if self.progress_callback:
-            self.progress_callback(message, data or {})
-        logger.info(f"📡 {message}")
+    col1, col2 = st.columns([2, 1])
     
-    def generate_question(self, topic, difficulty, question_type, max_retries=2):
-        """Generate ONE concise question with quota detection"""
+    with col1:
+        st.subheader("📝 Question Generation Parameters")
         
-        # ULTRA-CONCISE PROMPTS (saves tokens)
-        if question_type == "theory":
-            prompt = f"""Topic: {topic}
-Difficulty: {difficulty}
-Type: Theory (concepts, principles)
-
-Generate 1 CONCISE question & answer:
-Q: [30-50 words]
-A: [100-120 words, professional, complete]"""
+        topic = st.text_input(
+            "Interview Topic",
+            placeholder="e.g., Python for Data Science",
+            help="The main topic for which to generate interview questions"
+        )
+        
+        context_input = st.text_area(
+            "Sub-topics (one per line)",
+            placeholder="e.g., NumPy\nPandas\nMatplotlib\nScikit-learn",
+            help="Enter sub-topics related to your main topic"
+        )
+        
+        col_a, col_b = st.columns(2)
+        
+        with col_a:
+            num_questions = st.number_input(
+                "Number of Questions",
+                min_value=1,
+                max_value=50,
+                value=10,
+                help="Total number of questions to generate"
+            )
+        
+        with col_b:
+            generic_percentage = st.slider(
+                "Generic Questions %",
+                min_value=0,
+                max_value=100,
+                value=60,
+                step=5,
+                help="Percentage of generic/theoretical questions vs practical questions"
+            )
+        
+        practical_percentage = 100 - generic_percentage
+        
+        st.info(f"📊 Distribution: {generic_percentage}% Generic | {practical_percentage}% Practical Questions")
+    
+    with col2:
+        st.subheader("📋 Quick Settings")
+        
+        difficulty_level = st.select_slider(
+            "Difficulty Level",
+            options=["Beginner", "Intermediate", "Advanced", "Expert"],
+            value="Intermediate"
+        )
+        
+        question_type = st.multiselect(
+            "Question Types",
+            options=[
+                "Multiple Choice",
+                "Short Answer",
+                "Long Answer",
+                "Code-based",
+                "Scenario-based",
+                "Debugging"
+            ],
+            default=["Short Answer", "Long Answer"],
+            help="Select types of questions to include"
+        )
+        
+        include_answers = st.checkbox(
+            "Include Detailed Answers",
+            value=True,
+            help="Generate detailed answers for each question"
+        )
+    
+    st.divider()
+    
+    col1, col2, col3 = st.columns([1, 1, 1])
+    
+    with col2:
+        generate_button = st.button(
+            "🚀 Generate Questions",
+            use_container_width=True,
+            type="primary"
+        )
+    
+    if generate_button:
+        if not topic:
+            st.error("❌ Please enter a topic")
+        elif not api_key and not os.getenv("GEMINI_API_KEY"):
+            st.error("❌ Please provide a Gemini API Key")
+        elif not question_type:
+            st.error("❌ Please select at least one question type")
         else:
-            prompt = f"""Topic: {topic}
-Difficulty: {difficulty}
-Type: Practical (business scenario)
-
-Generate 1 CONCISE scenario question & answer:
-Q: [30-50 words with context]
-A: [100-120 words, actionable, complete]"""
-        
-        for attempt in range(max_retries):
             try:
-                response = self.model.generate_content(prompt)
-                text = response.text if hasattr(response, 'text') else ""
+                progress_bar = st.progress(0)
+                status_text = st.empty()
                 
-                if not text or len(text) < 50:
-                    time.sleep(1)
-                    continue
+                status_text.text("🔄 Initializing...")
+                progress_bar.progress(10)
                 
-                # Parse Q&A
-                lines = text.split('\n')
-                q_text = ""
-                a_text = ""
-                in_q = False
-                in_a = False
+                gemini_handler = GeminiHandler(api_key or os.getenv("GEMINI_API_KEY"), model_name)
+                question_generator = QuestionGenerator(gemini_handler)
                 
-                for line in lines:
-                    line = line.strip()
-                    if line.startswith('Q:'):
-                        in_q = True
-                        in_a = False
-                        q_text = line.replace('Q:', '').strip()
-                    elif line.startswith('A:'):
-                        in_a = True
-                        in_q = False
-                        a_text = line.replace('A:', '').strip()
-                    elif in_q and line:
-                        q_text += " " + line
-                    elif in_a and line:
-                        a_text += " " + line
+                status_text.text("📝 Processing sub-topics...")
+                progress_bar.progress(20)
                 
-                q_text = ' '.join(q_text.split())
-                a_text = ' '.join(a_text.split())
+                context = [c.strip() for c in context_input.split("\n") if c.strip()] if context_input else []
                 
-                if len(q_text) < 20 or len(a_text) < 50:
-                    time.sleep(1)
-                    continue
+                enhanced_context = ""
+                if web_scraper_enabled:
+                    status_text.text("🌐 Fetching current data from web...")
+                    progress_bar.progress(40)
+                    scraper = WebScraper()
+                    enhanced_context = scraper.scrape_topic(topic, context)
+                    progress_bar.progress(60)
+                elif rag_enabled:
+                    status_text.text("📚 Retrieving context from knowledge base...")
+                    progress_bar.progress(40)
+                    rag = RAGHandler()
+                    enhanced_context = rag.retrieve_context(topic, context)
+                    progress_bar.progress(60)
                 
-                if not a_text[-1] in '.!?':
-                    a_text += "."
+                status_text.text("🤖 Generating questions with Gemini...")
+                progress_bar.progress(70)
                 
-                # Type validation
-                if question_type == "theory":
-                    if any(word in q_text.lower() for word in ["your", "you are", "how would"]):
-                        time.sleep(1)
-                        continue
-                else:
-                    if not any(word in q_text.lower() for word in ["your", "company", "you", "scenario"]):
-                        time.sleep(1)
-                        continue
+                questions_data = question_generator.generate_questions(
+                    topic=topic,
+                    context=context,
+                    num_questions=num_questions,
+                    generic_percentage=generic_percentage,
+                    difficulty_level=difficulty_level,
+                    question_types=question_type,
+                    include_answers=include_answers,
+                    enhanced_context=enhanced_context
+                )
                 
-                logger.info(f"✅ Generated {difficulty} {question_type}")
-                return {'question': q_text, 'answer': a_text, 'type': question_type}
+                progress_bar.progress(90)
+                status_text.text("✅ Processing results...")
+                progress_bar.progress(100)
                 
+                st.session_state.questions_generated = True
+                st.session_state.questions_data = questions_data
+                
+                status_text.empty()
+                progress_bar.empty()
+                st.success("✅ Questions generated successfully!")
+                    
             except Exception as e:
-                error_msg = str(e)
-                
-                # QUOTA DETECTION
-                if "429" in error_msg or "quota" in error_msg.lower() or "exceeded" in error_msg.lower():
-                    logger.error(f"❌ QUOTA EXCEEDED")
-                    return {'error': 'quota_exceeded', 'message': 'API quota limit reached. Please use a new API key.'}
-                
-                logger.error(f"Error: {error_msg[:100]}")
-                time.sleep(1)
-        
-        return None
+                progress_bar.empty()
+                status_text.empty()
+                st.error(f"❌ Error generating questions: {str(e)}")
     
-    def generate_all(self, topic, total_questions, difficulty_levels, balance_ratio=0.5):
-        """Generate questions with quota fallback"""
-        start_time = time.time()
+    if st.session_state.questions_generated and st.session_state.questions_data:
+        st.divider()
+        st.subheader("📚 Generated Questions Preview")
         
-        self._send_progress("🚀 Starting...", {'stage': 'start', 'progress': 0})
+        questions_data = st.session_state.questions_data
         
-        questions_per_level = total_questions // len(difficulty_levels)
-        remainder = total_questions % len(difficulty_levels)
-        
-        all_q = {}
-        total_generated = 0
-        quota_exceeded = False
-        
-        for idx, difficulty in enumerate(difficulty_levels):
-            if quota_exceeded:
-                break
+        for i, q_obj in enumerate(questions_data["questions"], 1):
+            with st.expander(f"Question {i}: {q_obj['question'][:60]}...", expanded=False):
+                st.write(f"**Type:** {q_obj.get('type', 'N/A')}")
+                st.write(f"**Difficulty:** {q_obj.get('difficulty', 'N/A')}")
+                st.write(f"**Category:** {q_obj.get('category', 'Generic' if q_obj.get('is_generic') else 'Practical')}")
                 
-            level_count = questions_per_level + (1 if idx < remainder else 0)
-            theory_count = int(level_count * balance_ratio)
-            practical_count = level_count - theory_count
-            
-            self._send_progress(f"📊 {difficulty}...", 
-                              {'stage': 'level_start', 'difficulty': difficulty, 
-                               'progress': int((total_generated / total_questions) * 100)})
-            
-            questions = []
-            
-            # Theory
-            for i in range(theory_count):
-                if quota_exceeded:
-                    break
-                    
-                progress = int((total_generated / total_questions) * 100)
-                self._send_progress(f"Theory Q{total_generated + 1}...", 
-                                  {'stage': 'generating', 'progress': progress})
-                
-                result = self.generate_question(topic, difficulty, 'theory')
-                
-                if result and 'error' in result:
-                    if result['error'] == 'quota_exceeded':
-                        quota_exceeded = True
-                        self._send_progress("❌ API Quota Exceeded - Please use a new API key", 
-                                          {'stage': 'quota_error', 'error': 'quota_exceeded'})
-                        break
-                elif result:
-                    questions.append(result)
-                    total_generated += 1
-                    self._send_progress(f"✅ Theory complete", 
-                                      {'stage': 'question_complete', 'difficulty': difficulty,
-                                       'question': result, 'progress': int((total_generated / total_questions) * 100)})
-                
-                time.sleep(0.2)
-            
-            # Practical
-            for i in range(practical_count):
-                if quota_exceeded:
-                    break
-                    
-                progress = int((total_generated / total_questions) * 100)
-                self._send_progress(f"Practical Q{total_generated + 1}...", 
-                                  {'stage': 'generating', 'progress': progress})
-                
-                result = self.generate_question(topic, difficulty, 'practical')
-                
-                if result and 'error' in result:
-                    if result['error'] == 'quota_exceeded':
-                        quota_exceeded = True
-                        self._send_progress("❌ API Quota Exceeded - Please use a new API key", 
-                                          {'stage': 'quota_error', 'error': 'quota_exceeded'})
-                        break
-                elif result:
-                    questions.append(result)
-                    total_generated += 1
-                    self._send_progress(f"✅ Practical complete", 
-                                      {'stage': 'question_complete', 'difficulty': difficulty,
-                                       'question': result, 'progress': int((total_generated / total_questions) * 100)})
-                
-                time.sleep(0.2)
-            
-            all_q[difficulty] = questions
-            
-            if not quota_exceeded:
-                self._send_progress(f"✅ {difficulty} done", {'stage': 'level_complete'})
+                if include_answers and "answer" in q_obj:
+                    st.markdown("**Answer:**")
+                    st.write(q_obj["answer"])
         
-        total_time = time.time() - start_time
-        total = sum(len(q) for q in all_q.values())
+        st.divider()
         
-        if quota_exceeded:
-            self._send_progress(f"⚠️ Stopped at {total} questions - API quota limit reached. Use a new key.", 
-                              {'stage': 'quota_final', 'total': total, 'time_elapsed': round(total_time, 1), 
-                               'progress': 100, 'error': 'quota_exceeded'})
-        else:
-            self._send_progress(f"🎉 Complete! {total} questions in {total_time:.1f}s", 
-                              {'stage': 'final', 'total': total, 'time_elapsed': round(total_time, 1), 'progress': 100})
+        st.subheader("📄 Export to PDF")
         
-        return all_q, total_time
-    
-    def create_pdf(self, topic, questions, difficulty_levels):
-        """Create PDF"""
-        filename = f"{topic.replace(' ', '_')[:50]}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
-        path = os.path.join(os.getcwd(), filename)
+        col1, col2 = st.columns(2)
         
-        try:
-            doc = SimpleDocTemplate(path, pagesize=letter)
-            story = []
-            styles = getSampleStyleSheet()
-            
-            title_style = ParagraphStyle('Title', parent=styles['Title'], 
-                                        fontSize=24, textColor=HexColor('#2E86AB'), alignment=1)
-            story.append(Paragraph(f"Leadership Interview: {topic}", title_style))
-            story.append(Paragraph(f"Generated: {datetime.now().strftime('%B %d, %Y')}", styles['Normal']))
-            story.append(Spacer(1, 20))
-            
-            for diff in difficulty_levels:
-                if diff in questions and questions[diff]:
-                    h_style = ParagraphStyle('Header', parent=styles['Heading1'], 
-                                           fontSize=16, textColor=HexColor('#F24236'))
-                    story.append(Paragraph(f"{diff} Level", h_style))
-                    
-                    for i, q in enumerate(questions[diff], 1):
-                        q_type = q.get('type', 'general')
-                        type_label = "🎓 Theory" if q_type == 'theory' else "💼 Practical"
-                        
-                        story.append(Paragraph(f"<b>Q{i} {type_label}:</b> {q['question']}", styles['Normal']))
-                        story.append(Paragraph(f"<b>A:</b> {q['answer']}", styles['Normal']))
-                        story.append(Spacer(1, 12))
-            
-            doc.build(story)
-            return filename
-        except Exception as e:
-            logger.error(f"PDF error: {e}")
-            return None
-
-@app.route('/')
-def index():
-    return render_template('index.html')
-
-@app.route('/generate_stream', methods=['POST'])
-def generate_stream():
-    try:
-        data = request.get_json()
-        topic = data.get('topic', '').strip()
-        gemini_key = data.get('api_key', '').strip() or os.getenv('GEMINI_API_KEY')
-        total_questions = int(data.get('total_questions', 10))
-        difficulty_levels = data.get('difficulty_levels', ['Beginner', 'Intermediate', 'Advanced'])
-        balance_ratio = float(data.get('balance_ratio', 0.5))
+        with col1:
+            pdf_filename = st.text_input(
+                "PDF Filename",
+                value=f"Interview_Questions_{topic.replace(' ', '_')}",
+                help="Name for your PDF file (without .pdf extension)"
+            )
         
-        if not topic or not gemini_key:
-            return jsonify({'error': 'Topic and API key required'}), 400
+        with col2:
+            include_metadata = st.checkbox(
+                "Include Metadata",
+                value=True,
+                help="Include generation date, parameters, and metadata in PDF"
+            )
         
-        if total_questions > 50:
-            return jsonify({'error': 'Maximum 50 questions'}), 400
-        
-        import uuid
-        stream_id = str(uuid.uuid4())
-        update_queues[stream_id] = queue.Queue()
-        
-        def generate_in_background():
+        if st.button("📥 Generate PDF", use_container_width=True, type="secondary"):
             try:
-                def progress_callback(message, data):
-                    update_queues[stream_id].put({'message': message, 'data': data})
-                
-                gen = BusinessInterviewGenerator(gemini_key, progress_callback)
-                all_q, gen_time = gen.generate_all(topic, total_questions, difficulty_levels, balance_ratio)
-                
-                update_queues[stream_id].put({
-                    'message': 'COMPLETE',
-                    'data': {
-                        'stage': 'complete',
-                        'questions': all_q,
-                        'total': sum(len(q) for q in all_q.values()),
-                        'generation_time': gen_time,
-                        'difficulty_levels': difficulty_levels
-                    }
-                })
-                
+                with st.spinner("📄 Creating PDF... Please wait"):
+                    pdf_generator = PDFGenerator()
+                    pdf_path = pdf_generator.generate_pdf(
+                        questions_data=questions_data,
+                        filename=pdf_filename,
+                        include_metadata=include_metadata,
+                        topic=topic,
+                        difficulty=difficulty_level,
+                        generic_percentage=generic_percentage
+                    )
+                    
+                    with open(pdf_path, "rb") as pdf_file:
+                        st.download_button(
+                            label="⬇️ Download PDF",
+                            data=pdf_file,
+                            file_name=f"{pdf_filename}.pdf",
+                            mime="application/pdf",
+                            use_container_width=True
+                        )
+                    
+                    st.success(f"✅ PDF created successfully!")
+                    
             except Exception as e:
-                logger.error(f"Error: {e}")
-                update_queues[stream_id].put({
-                    'message': f'ERROR: {str(e)}',
-                    'data': {'stage': 'error', 'error': str(e)}
-                })
+                st.error(f"❌ Error generating PDF: {str(e)}")
         
-        thread = threading.Thread(target=generate_in_background, daemon=True)
-        thread.start()
+        st.divider()
+        st.subheader("📊 Generation Statistics")
         
-        return jsonify({'success': True, 'stream_id': stream_id})
+        col1, col2, col3, col4 = st.columns(4)
         
-    except Exception as e:
-        logger.error(f"Stream error: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/stream/<stream_id>')
-def stream_updates(stream_id):
-    def generate_events():
-        if stream_id not in update_queues:
-            yield f"data: {json.dumps({'error': 'Invalid stream'})}\n\n"
-            return
+        generic_count = sum(1 for q in questions_data["questions"] if q.get("is_generic"))
+        practical_count = len(questions_data["questions"]) - generic_count
         
-        q = update_queues[stream_id]
-        
-        while True:
-            try:
-                update = q.get(timeout=45)
-                yield f"data: {json.dumps(update)}\n\n"
-                
-                if update.get('message') in ['COMPLETE'] or update.get('message', '').startswith('ERROR'):
-                    if stream_id in update_queues:
-                        del update_queues[stream_id]
-                    break
-            except queue.Empty:
-                yield f"data: {json.dumps({'message': 'ping'})}\n\n"
+        with col1:
+            st.metric("Total Questions", len(questions_data["questions"]))
+        with col2:
+            st.metric("Generic Questions", generic_count)
+        with col3:
+            st.metric("Practical Questions", practical_count)
+        with col4:
+            st.metric("Generation Time", f"{questions_data.get('generation_time', 'N/A')}s")
     
-    return Response(generate_events(), mimetype='text/event-stream')
+    st.divider()
+    st.markdown("""
+    <div class="tips-box">
+    <strong>💡 Tips:</strong><br/>
+    - Provide specific sub-topics for more relevant questions<br/>
+    - Adjust the generic/practical ratio based on your interview focus<br/>
+    - Enable web scraping or RAG for more current and contextual questions<br/>
+    - Review questions before sharing with candidates<br/>
+    - Use ChromaDB for RAG to maintain up-to-date knowledge base
+    </div>
+    """, unsafe_allow_html=True)
 
-@app.route('/download_pdf', methods=['POST'])
-def download_pdf():
-    try:
-        data = request.get_json()
-        topic = data.get('topic', '')
-        questions = data.get('questions', {})
-        difficulty_levels = data.get('difficulty_levels', ['Beginner', 'Intermediate', 'Advanced'])
-        api_key = data.get('api_key', '') or os.getenv('GEMINI_API_KEY')
-        
-        gen = BusinessInterviewGenerator(api_key)
-        filename = gen.create_pdf(topic, questions, difficulty_levels)
-        
-        if not filename:
-            return jsonify({'error': 'PDF creation failed'}), 500
-        
-        path = os.path.join(os.getcwd(), filename)
-        return send_file(path, as_attachment=True, download_name=filename)
-    
-    except Exception as e:
-        logger.error(f"PDF error: {e}")
-        return jsonify({'error': str(e)}), 500
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    logger.info("🚀 Business Leadership Interview Generator (Optimized)")
-    app.run(host='0.0.0.0', port=port, debug=False)
+if __name__ == "__main__":
+    main()
